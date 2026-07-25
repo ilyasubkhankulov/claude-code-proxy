@@ -1198,6 +1198,7 @@ mod tests {
             session_id: None,
             session_seq: None,
             provider: "codex".to_string(),
+            anthropic_headers: http::HeaderMap::new(),
             traffic: None,
             monitor: Some(monitor.clone()),
         };

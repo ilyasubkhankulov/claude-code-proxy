@@ -41,6 +41,13 @@ These settings configure the proxy process. Claude Code client settings such as 
     "clientVersion": "0.48.5",
     "agentBundle": "/path/to/cursor-agent/index.js"
   },
+  "openaiCompatible": {
+    "example": {
+      "baseUrl": "https://api.example.com/v1",
+      "apiKeyEnv": "EXAMPLE_API_KEY",
+      "models": ["org/model"]
+    }
+  },
   "log": {
     "stderr": false,
     "verbose": false
@@ -48,7 +55,7 @@ These settings configure the proxy process. Claude Code client settings such as 
 }
 ```
 
-All keys are optional. An unreadable file, malformed JSON, or incompatible field type causes the file configuration to be ignored and built-in or environment values to apply.
+All keys are optional. Invalid `openaiCompatible` definitions or malformed JSON prevent startup with an actionable error; this avoids ambiguous model routing.
 
 ## Core and diagnostics
 
@@ -107,6 +114,22 @@ All keys are optional. An unreadable file, malformed JSON, or incompatible field
 | `CCP_CURSOR_CLIENT_VERSION` | `cursor.clientVersion` | `0.48.5` | Changes Cursor client version headers. |
 | `CCP_CURSOR_AGENT_BUNDLE` | `cursor.agentBundle` | Auto-detected | Points to Cursor Agent's bundled `index.js` protobuf schemas. |
 | `CCP_CURSOR_AUTH_TOKEN` | none | unset | Uses a bearer token instead of proxy-owned Cursor auth storage. |
+
+## OpenAI-compatible APIs
+
+`openaiCompatible` is a map of user-defined provider names. Each entry requires:
+
+| Config key | Purpose |
+| --- | --- |
+| `baseUrl` | Absolute HTTP(S) API root. The proxy appends the endpoint selected by `protocol`. |
+| `apiKeyEnv` | Name of the process environment variable containing the bearer token. The secret is never stored in `config.json`. |
+| `models` | Non-empty list of exact model IDs routed to this provider. IDs must be unique across all providers. |
+| `protocol` | Optional wire protocol: `openai-chat` (default, appends `/chat/completions`) or `anthropic-messages` (appends `/messages`). |
+| `headers` | Optional map of literal, non-secret headers added to upstream requests. Defaults to empty. |
+
+Configured API keys are resolved only when a request is routed to that provider. Authentication uses the standard `Authorization: Bearer` header. Custom headers are validated at startup and cannot override authentication, content negotiation, host/framing, user-agent, proxy-auth, or hop-by-hop headers. Native Anthropic entries preserve Messages request and response bodies and selectively forward incoming `anthropic-version` and `anthropic-beta`; OpenAI entries use request/response translation. Token counting remains local for both protocols.
+
+Header values are stored as plaintext in `config.json`; use `apiKeyEnv` for credentials. Configuration summaries report only the number of custom headers, not their names or values. See [OpenAI-compatible APIs](/providers/openai-compatible/) for Arcee and Cloudflare AI Gateway examples and protocol requirements.
 
 ## Shared compatibility fallbacks
 

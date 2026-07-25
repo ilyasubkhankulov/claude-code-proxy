@@ -1,5 +1,7 @@
+use anyhow::{Context, Result, anyhow, bail};
+use http::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -42,6 +44,56 @@ struct FileConfig {
     pub codex: Option<CodexConfig>,
     pub cursor: Option<CursorConfig>,
     pub grok: Option<GrokConfig>,
+    #[serde(rename = "openaiCompatible")]
+    pub openai_compatible: Option<BTreeMap<String, OpenAiCompatibleFileConfig>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+pub enum CompatibleProtocol {
+    #[default]
+    #[serde(rename = "openai-chat")]
+    OpenAiChat,
+    #[serde(rename = "anthropic-messages")]
+    AnthropicMessages,
+}
+
+impl CompatibleProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiChat => "openai-chat",
+            Self::AnthropicMessages => "anthropic-messages",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiCompatibleProviderConfig {
+    pub name: String,
+    pub base_url: String,
+    pub api_key_env: String,
+    pub models: Vec<String>,
+    pub headers: BTreeMap<String, String>,
+    pub protocol: CompatibleProtocol,
+    /// Maps an incoming (client-facing) model ID to the model ID actually sent
+    /// upstream. A rewrite key is implicitly routable to this provider, so the
+    /// client can keep using a Claude-Code-recognized ID (e.g. `claude-opus-4-8`)
+    /// while the proxy forwards the gateway's ID (e.g. `anthropic/claude-opus-4.8`).
+    pub model_rewrites: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct OpenAiCompatibleFileConfig {
+    #[serde(rename = "baseUrl")]
+    base_url: String,
+    #[serde(rename = "apiKeyEnv")]
+    api_key_env: String,
+    models: Vec<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    protocol: CompatibleProtocol,
+    #[serde(rename = "modelRewrites", default)]
+    model_rewrites: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -115,6 +167,148 @@ fn read_file_config(config_dir: &Path) -> Option<FileConfig> {
     let path = config_dir.join("config.json");
     let raw = fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+pub fn openai_compatible_providers() -> Result<Vec<OpenAiCompatibleProviderConfig>> {
+    let path = paths::config_dir().join("config.json");
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    };
+    let file: FileConfig =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+    let providers = file.openai_compatible.unwrap_or_default();
+    let mut out = Vec::with_capacity(providers.len());
+
+    for (name, provider) in providers {
+        validate_openai_compatible_provider(&name, &provider)?;
+        out.push(OpenAiCompatibleProviderConfig {
+            name,
+            base_url: provider.base_url.trim_end_matches('/').to_string(),
+            api_key_env: provider.api_key_env,
+            models: provider.models,
+            headers: provider.headers,
+            protocol: provider.protocol,
+            model_rewrites: provider.model_rewrites,
+        });
+    }
+
+    Ok(out)
+}
+
+fn validate_openai_compatible_provider(
+    name: &str,
+    provider: &OpenAiCompatibleFileConfig,
+) -> Result<()> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!(
+            "openaiCompatible provider name {name:?} must contain only letters, numbers, '-' or '_'"
+        );
+    }
+    if matches!(name, "codex" | "kimi" | "cursor" | "grok") {
+        bail!("openaiCompatible provider name {name:?} is reserved");
+    }
+
+    let url = reqwest::Url::parse(&provider.base_url)
+        .map_err(|err| anyhow!("openaiCompatible.{name}.baseUrl is invalid: {err}"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        bail!("openaiCompatible.{name}.baseUrl must be an absolute HTTP(S) URL");
+    }
+    if provider.api_key_env.trim().is_empty() {
+        bail!("openaiCompatible.{name}.apiKeyEnv must not be empty");
+    }
+    parse_openai_compatible_headers(name, &provider.headers)?;
+    if provider.models.is_empty() {
+        bail!("openaiCompatible.{name}.models must not be empty");
+    }
+
+    let mut seen = HashSet::new();
+    for model in &provider.models {
+        if model.trim().is_empty() {
+            bail!("openaiCompatible.{name}.models must not contain an empty model ID");
+        }
+        if !seen.insert(model) {
+            bail!("openaiCompatible.{name}.models contains duplicate model {model:?}");
+        }
+    }
+
+    for (from, to) in &provider.model_rewrites {
+        if from.trim().is_empty() {
+            bail!(
+                "openaiCompatible.{name}.modelRewrites must not contain an empty source model ID"
+            );
+        }
+        if to.trim().is_empty() {
+            bail!("openaiCompatible.{name}.modelRewrites has an empty target for model {from:?}");
+        }
+        if seen.contains(from) {
+            bail!(
+                "openaiCompatible.{name}.modelRewrites key {from:?} also appears in models; list it in only one place"
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_openai_compatible_headers(
+    provider_name: &str,
+    headers: &BTreeMap<String, String>,
+) -> Result<HeaderMap> {
+    let mut parsed = HeaderMap::new();
+    let mut seen = HashSet::new();
+
+    for (name, value) in headers {
+        let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            anyhow!(
+                "openaiCompatible.{provider_name}.headers contains invalid header name {name:?}"
+            )
+        })?;
+        let normalized = header_name.as_str();
+        if !seen.insert(normalized.to_string()) {
+            bail!(
+                "openaiCompatible.{provider_name}.headers contains duplicate header name {name:?}"
+            );
+        }
+        if is_reserved_openai_compatible_header(normalized) {
+            bail!(
+                "openaiCompatible.{provider_name}.headers cannot override reserved header {name:?}"
+            );
+        }
+        let header_value = value.parse::<HeaderValue>().map_err(|_| {
+            anyhow!(
+                "openaiCompatible.{provider_name}.headers contains invalid value for header {name:?}"
+            )
+        })?;
+        parsed.insert(header_name, header_value);
+    }
+
+    Ok(parsed)
+}
+
+fn is_reserved_openai_compatible_header(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization"
+            | "accept"
+            | "content-type"
+            | "content-length"
+            | "host"
+            | "user-agent"
+            | "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "proxy-connection"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
 }
 
 pub fn load_config() -> LoadedConfig {
@@ -284,6 +478,23 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
             }
             if codex.responses_api == Some(true) {
                 out.push("codex.responsesApi: true".to_string());
+            }
+        }
+        if let Some(providers) = file_cfg.openai_compatible {
+            for (name, provider) in providers {
+                let key_state = if env.contains_key(&provider.api_key_env) {
+                    "set"
+                } else {
+                    "unset"
+                };
+                out.push(format!(
+                    "openaiCompatible.{name}: {} protocol, {} models, key env {} ({key_state}), {} custom headers, {} model rewrites",
+                    provider.protocol.as_str(),
+                    provider.models.len(),
+                    provider.api_key_env,
+                    provider.headers.len(),
+                    provider.model_rewrites.len()
+                ));
             }
         }
     }
@@ -700,6 +911,218 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn openai_compatible_config_loads_without_reading_secret() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"arcee":{"baseUrl":"https://api.arcee.ai/api/v1/","apiKeyEnv":"ARCEE_API_KEY","models":["org/model"]}}}"#,
+        )
+        .unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+
+        let providers = openai_compatible_providers().unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].name, "arcee");
+        assert_eq!(providers[0].base_url, "https://api.arcee.ai/api/v1");
+        assert_eq!(providers[0].api_key_env, "ARCEE_API_KEY");
+        assert_eq!(providers[0].models, vec!["org/model"]);
+        assert_eq!(providers[0].protocol, CompatibleProtocol::OpenAiChat);
+        assert!(providers[0].headers.is_empty());
+    }
+
+    #[test]
+    fn openai_compatible_config_loads_protocol_and_rejects_unknown_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"cloudflare":{"baseUrl":"https://api.cloudflare.com/client/v4/accounts/test/ai/v1","apiKeyEnv":"CF_AIG_TOKEN","models":["anthropic/claude-sonnet-5"],"protocol":"anthropic-messages"}}}"#,
+        )
+        .unwrap();
+
+        let providers = openai_compatible_providers().unwrap();
+        assert_eq!(providers[0].protocol, CompatibleProtocol::AnthropicMessages);
+
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"custom":{"baseUrl":"https://example.com/v1","apiKeyEnv":"KEY","models":["x"],"protocol":"unknown"}}}"#,
+        )
+        .unwrap();
+        assert!(openai_compatible_providers().is_err());
+    }
+
+    #[test]
+    fn openai_compatible_config_loads_literal_headers() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"cloudflare":{"baseUrl":"https://api.cloudflare.com/client/v4/accounts/test/ai/v1","apiKeyEnv":"CF_AIG_TOKEN","models":["openai/gpt-5.5"],"headers":{"cf-aig-gateway-id":"gateway"}}}}"#,
+        )
+        .unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+
+        let providers = openai_compatible_providers().unwrap();
+        assert_eq!(
+            providers[0].headers.get("cf-aig-gateway-id"),
+            Some(&"gateway".to_string())
+        );
+    }
+
+    #[test]
+    fn openai_compatible_headers_reject_invalid_duplicates_and_reserved_names() {
+        let invalid_name = BTreeMap::from([("bad header".to_string(), "value".to_string())]);
+        assert!(parse_openai_compatible_headers("custom", &invalid_name).is_err());
+
+        let duplicates = BTreeMap::from([
+            ("X-Custom".to_string(), "one".to_string()),
+            ("x-custom".to_string(), "two".to_string()),
+        ]);
+        assert!(parse_openai_compatible_headers("custom", &duplicates).is_err());
+
+        for name in [
+            "Authorization",
+            "ACCEPT",
+            "Content-Type",
+            "content-length",
+            "Host",
+            "user-agent",
+            "Connection",
+            "keep-alive",
+            "proxy-authenticate",
+            "Proxy-Authorization",
+            "proxy-connection",
+            "TE",
+            "trailer",
+            "Transfer-Encoding",
+            "upgrade",
+        ] {
+            let headers = BTreeMap::from([(name.to_string(), "value".to_string())]);
+            let error = parse_openai_compatible_headers("custom", &headers)
+                .expect_err("reserved header should fail")
+                .to_string();
+            assert!(error.contains("reserved header"), "{name}: {error}");
+            assert!(!error.contains("value"));
+        }
+    }
+
+    #[test]
+    fn openai_compatible_headers_reject_injection_without_exposing_value() {
+        let secret = "secret-value\r\nx-injected: true";
+        let headers = BTreeMap::from([("x-custom".to_string(), secret.to_string())]);
+        let error = parse_openai_compatible_headers("custom", &headers)
+            .expect_err("invalid header value should fail")
+            .to_string();
+        assert!(error.contains("x-custom"));
+        assert!(!error.contains(secret));
+        assert!(!error.contains("secret-value"));
+    }
+
+    #[test]
+    fn openai_compatible_summary_reports_only_header_count() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"cloudflare":{"baseUrl":"https://api.cloudflare.com/client/v4/accounts/test/ai/v1","apiKeyEnv":"CF_AIG_TOKEN","models":["openai/gpt-5.5"],"headers":{"cf-aig-gateway-id":"private-gateway-name"}}}}"#,
+        )
+        .unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+
+        let summary = config_override_summary_lines(&load_config()).join("\n");
+        assert!(summary.contains("1 custom headers"));
+        assert!(!summary.contains("cf-aig-gateway-id"));
+        assert!(!summary.contains("private-gateway-name"));
+    }
+
+    #[test]
+    fn openai_compatible_config_rejects_reserved_name_and_duplicate_models() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"codex":{"baseUrl":"https://example.com/v1","apiKeyEnv":"KEY","models":["x"]}}}"#,
+        )
+        .unwrap();
+        assert!(openai_compatible_providers().is_err());
+
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"custom":{"baseUrl":"https://example.com/v1","apiKeyEnv":"KEY","models":["x","x"]}}}"#,
+        )
+        .unwrap();
+        assert!(openai_compatible_providers().is_err());
+    }
+
+    #[test]
+    fn openai_compatible_config_loads_model_rewrites() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"cloudflare":{"baseUrl":"https://api.cloudflare.com/client/v4/accounts/test/ai/v1","apiKeyEnv":"CF_AIG_TOKEN","protocol":"anthropic-messages","models":["anthropic/claude-sonnet-5"],"modelRewrites":{"claude-opus-4-8":"anthropic/claude-opus-4.8"}}}}"#,
+        )
+        .unwrap();
+
+        let providers = openai_compatible_providers().unwrap();
+        assert_eq!(
+            providers[0].model_rewrites.get("claude-opus-4-8"),
+            Some(&"anthropic/claude-opus-4.8".to_string())
+        );
+    }
+
+    #[test]
+    fn openai_compatible_config_rejects_bad_model_rewrites() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+
+        // Empty rewrite target.
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"cloudflare":{"baseUrl":"https://example.com/v1","apiKeyEnv":"KEY","models":["x"],"modelRewrites":{"claude-opus-4-8":""}}}}"#,
+        )
+        .unwrap();
+        assert!(openai_compatible_providers().is_err());
+
+        // Rewrite key also present in models.
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"cloudflare":{"baseUrl":"https://example.com/v1","apiKeyEnv":"KEY","models":["claude-opus-4-8"],"modelRewrites":{"claude-opus-4-8":"anthropic/claude-opus-4.8"}}}}"#,
+        )
+        .unwrap();
+        assert!(openai_compatible_providers().is_err());
+    }
+
+    #[test]
+    fn openai_compatible_summary_reports_model_rewrite_count_only() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"cloudflare":{"baseUrl":"https://api.cloudflare.com/client/v4/accounts/test/ai/v1","apiKeyEnv":"CF_AIG_TOKEN","protocol":"anthropic-messages","models":["anthropic/claude-sonnet-5"],"modelRewrites":{"claude-opus-4-8":"anthropic/claude-opus-4.8"}}}}"#,
+        )
+        .unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+
+        let summary = config_override_summary_lines(&load_config()).join("\n");
+        assert!(summary.contains("1 model rewrites"));
+        assert!(!summary.contains("claude-opus-4.8"));
     }
 
     #[test]

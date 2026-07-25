@@ -1,7 +1,7 @@
 # claude-code-proxy
 
-Claude Code, powered by **OpenAI Codex**, **Kimi**, **Grok**, or **Cursor
-Agent**.
+Claude Code, powered by **OpenAI Codex**, **Kimi**, **Grok**, **Cursor
+Agent**, or a configurable **OpenAI-compatible API**.
 
 Docs: <https://claude-code-proxy.raine.dev>
 
@@ -13,8 +13,7 @@ LLM docs: <https://claude-code-proxy.raine.dev/llms.txt>
 
 Claude Code remains an excellent coding harness, with strong tools, skills,
 hooks, subagents, and editor integrations. claude-code-proxy keeps that client
-experience while translating its Anthropic API traffic for subscription-backed
-provider services.
+experience while translating its Anthropic API traffic for provider services.
 
 One local process handles provider authentication, model-based routing,
 protocol translation, streaming responses, and diagnostics. The built-in
@@ -74,6 +73,7 @@ for the complete first session.
 | Kimi         | kimi.com with Kimi Code access | `kimi-for-coding` and aliases                   |
 | Grok         | grok.com                       | Registered Grok models                          |
 | Cursor Agent | Cursor account                 | Cursor aliases and `cursor:<model-id>` prefixes |
+| OpenAI compatible | Provider API key | Exact model IDs configured in `config.json` |
 
 Run `claude-code-proxy models` for the current catalog or
 `claude-code-proxy models --full` for every dynamic Cursor alias.
@@ -89,6 +89,7 @@ Run `claude-code-proxy models` for the current catalog or
 
 - [What is claude-code-proxy?](https://claude-code-proxy.raine.dev/)
 - [Choosing a provider](https://claude-code-proxy.raine.dev/providers/choosing-a-provider/)
+- [OpenAI-compatible APIs](https://claude-code-proxy.raine.dev/providers/openai-compatible/)
 - [Configure Claude Code](https://claude-code-proxy.raine.dev/using/configure-claude-code/)
 - [Models and routing](https://claude-code-proxy.raine.dev/using/models-and-routing/)
 - [Monitor TUI](https://claude-code-proxy.raine.dev/using/monitor-tui/)

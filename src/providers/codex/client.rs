@@ -1463,6 +1463,7 @@ mod tests {
             session_id: None,
             session_seq: None,
             provider: "codex".into(),
+            anthropic_headers: http::HeaderMap::new(),
             traffic: None,
             monitor: None,
         }
@@ -1973,6 +1974,7 @@ mod tests {
             session_id: Some("s".into()),
             session_seq: None,
             provider: "codex".into(),
+            anthropic_headers: http::HeaderMap::new(),
             traffic: None,
             monitor: None,
         };
@@ -2001,6 +2003,7 @@ mod tests {
             session_id: None,
             session_seq: None,
             provider: "codex".into(),
+            anthropic_headers: http::HeaderMap::new(),
             traffic: None,
             monitor: None,
         };
@@ -2028,6 +2031,7 @@ mod tests {
             session_id: None,
             session_seq: None,
             provider: "codex".into(),
+            anthropic_headers: http::HeaderMap::new(),
             traffic: None,
             monitor: None,
         };
@@ -2049,6 +2053,7 @@ mod tests {
             session_id: Some("bad\nsession".into()),
             session_seq: None,
             provider: "codex".into(),
+            anthropic_headers: http::HeaderMap::new(),
             traffic: None,
             monitor: None,
         };
@@ -2104,6 +2109,7 @@ mod tests {
             session_id: Some("session".into()),
             session_seq: None,
             provider: "codex".into(),
+            anthropic_headers: http::HeaderMap::new(),
             traffic: None,
             monitor: None,
         };
@@ -2179,6 +2185,7 @@ mod tests {
             session_id: None,
             session_seq: None,
             provider: "codex".into(),
+            anthropic_headers: http::HeaderMap::new(),
             traffic: None,
             monitor: None,
         };
