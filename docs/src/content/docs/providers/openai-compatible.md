@@ -183,6 +183,30 @@ Confirm with `/context`. It should report `Auto-compact window: 1000000 tokens`,
 
 The proxy's `[1m]`-suffix normalization (`normalize_incoming_model`) strips the suffix before matching, so both `claude-opus-4-8[1m]` (a rewrite key) and `anthropic/claude-sonnet-5[1m]` (an exact `models` entry) route to the `cloudflare-anthropic` provider.
 
+## Prompt caching and cost control
+
+When you point Claude Code at a gateway with your own API key, you pay per token, so keeping Anthropic's automatic prompt caching intact matters. Be aware of one gateway limitation: the Cloudflare AI Gateway requires the `anthropic-messages` `system` field to be a plain string, so the proxy flattens structured system blocks and **system-level `cache_control` breakpoints cannot be sent through it**. Caching of conversation/message content is unaffected. If you need full system-prompt caching, route to a backend that accepts the native Anthropic schema (structured `system` with `cache_control`) rather than Cloudflare's gateway.
+
+To keep caching effective and background traffic cheap, on the Claude Code side:
+
+- **Avoid mid-session model switches.** Each model has its own cache; `/model`, `opusplan` plan-mode toggles, and auto-fallback all invalidate it and force a full uncached re-read.
+- **Do not set `DISABLE_PROMPT_CACHING`** (or the per-tier variants). They raise cost — they exist for debugging only.
+- **Route background work to a cheap model** with `ANTHROPIC_DEFAULT_HAIKU_MODEL` (session titles, summaries, and other background calls use the `haiku` alias). Point it at a configured, cheap gateway model.
+- **Cut nonessential traffic** with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (disables auto-updates, telemetry, error reporting, release notes, and background availability/model-discovery refreshes).
+- **Cap output** with `CLAUDE_CODE_MAX_OUTPUT_TOKENS` and thinking with `MAX_THINKING_TOKENS` if you want tighter per-turn ceilings — but keep `CLAUDE_CODE_MAX_OUTPUT_TOKENS` modest, since a large value shrinks usable context before auto-compaction.
+
+## What Claude Code disables behind a custom base URL
+
+Some Claude Code features are gated on the client side by `ANTHROPIC_BASE_URL` and are switched off whenever the host is not `api.anthropic.com`. The proxy cannot re-enable these — they are decided before any request reaches it:
+
+- **Remote Control** is unavailable through any custom base URL.
+- **MCP tool search** is off by default on a non-first-party host. Re-enable it with `ENABLE_TOOL_SEARCH=true` *only* if your gateway forwards `tool_reference` blocks and serves a model that supports them; otherwise leave it off.
+- **The WebFetch preflight** and the **fast-mode availability check** call `api.anthropic.com` directly rather than through the proxy. If egress to Anthropic is blocked they can report spurious errors even when inference works. Set `"skipWebFetchPreflight": true` in `settings.json` to skip the preflight.
+
+If your gateway strips the `anthropic-beta` header (this proxy does **not** — it forwards `anthropic-version` and `anthropic-beta` verbatim) you may see `400 Extra inputs are not permitted`; the client-side fallback is `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`.
+
+For a TLS-inspecting corporate proxy in front of the gateway, point Node at the CA bundle with `NODE_EXTRA_CA_CERTS=/path/to/ca.pem` rather than disabling verification.
+
 ## Add another compatible API
 
 Add another entry beneath `openaiCompatible`. Provider names must be unique and may contain letters, numbers, hyphens, and underscores. Model IDs must be unique across all built-in and configured providers.
@@ -206,7 +230,7 @@ The proxy validates the provider catalog at startup. It does not require every c
 Choose a protocol per entry:
 
 - `openai-chat` (the default) requires `POST <baseUrl>/chat/completions`, standard Chat Completions messages/function tools, JSON responses, and OpenAI-style SSE chunks ending in `[DONE]`. Requests and responses are translated.
-- `anthropic-messages` requires `POST <baseUrl>/messages`. Anthropic request JSON and JSON/SSE response bodies pass through natively, while only safe response headers are copied.
+- `anthropic-messages` requires `POST <baseUrl>/messages`. Anthropic request JSON and JSON/SSE response bodies pass through natively, while only safe response headers are copied. Note that the Cloudflare gateway's validator is stricter than `api.anthropic.com`: it requires `system` to be a plain string (structured system arrays are rejected), so the proxy flattens system blocks and drops the `context_management` beta field. A side effect is that system-level `cache_control` breakpoints cannot be sent through the gateway.
 
 Both protocols use bearer-token authentication and configured literal headers. Token counting is an approximation performed locally and does not call the upstream API. The OpenAI translator recognizes `reasoning_content` and `reasoning` response fields in addition to standard text and tool calls.
 

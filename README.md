@@ -89,7 +89,7 @@ Run `claude-code-proxy models` for the current catalog or
 
 - [What is claude-code-proxy?](https://claude-code-proxy.raine.dev/)
 - [Choosing a provider](https://claude-code-proxy.raine.dev/providers/choosing-a-provider/)
-- [OpenAI-compatible APIs](https://claude-code-proxy.raine.dev/providers/openai-compatible/)
+- [OpenAI-compatible APIs](https://claude-code-proxy.raine.dev/providers/openai-compatible/) — model rewriting, prompt-caching passthrough, cost control, and which Claude Code features a custom base URL disables
 - [Configure Claude Code](https://claude-code-proxy.raine.dev/using/configure-claude-code/)
 - [Models and routing](https://claude-code-proxy.raine.dev/using/models-and-routing/)
 - [Monitor TUI](https://claude-code-proxy.raine.dev/using/monitor-tui/)

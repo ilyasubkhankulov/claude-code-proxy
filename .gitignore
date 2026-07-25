@@ -3,3 +3,4 @@ dist/
 .astro/
 target/
 .env
+meta/plans/

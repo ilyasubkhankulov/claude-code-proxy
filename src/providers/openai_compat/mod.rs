@@ -221,9 +221,25 @@ impl Provider for OpenAiCompatibleProvider {
     }
 }
 
+/// Prepare a request for a native Anthropic Messages gateway.
+///
+/// The Cloudflare AI Gateway's `/ai/v1/messages` validator is stricter than
+/// `api.anthropic.com`. Two constraints were confirmed live against the
+/// gateway and are the reason this normalizer is lossy:
+///
+/// * `system` must be a plain string. A structured content-block array is
+///   rejected with `Invalid value at system: expected string, received
+///   array`, so system blocks are flattened into a single string here.
+/// * the `context_management` beta body field is rejected with `Extra inputs
+///   are not permitted` (even though the paired `anthropic-beta` header is
+///   forwarded), so it is dropped.
+///
+/// A consequence is that system-level `cache_control` breakpoints cannot be
+/// expressed through this gateway — system-prompt prompt caching is simply not
+/// available on the `anthropic-messages` path. Message content is forwarded
+/// unchanged. Making these transforms conditional for a stricter-vs-permissive
+/// backend is tracked as a follow-up.
 fn normalize_anthropic_messages(mut body: MessagesRequest) -> Result<MessagesRequest> {
-    // Claude Code sends this Anthropic beta extension, but compatible gateways may
-    // reject it rather than ignore it.
     body.extra.remove("context_management");
 
     let mut system_text = Vec::new();
