@@ -102,7 +102,7 @@ Export `CF_AIG_TOKEN` in the shell that starts the proxy. For example, add it to
 CF_AIG_TOKEN=your-cloudflare-api-token
 ```
 
-For `anthropic-messages`, the proxy calls `.../ai/v1/messages` and forwards native Messages tools and message content blocks. For compatibility with gateways that accept only Anthropic's string form, top-level system blocks plus any `system` or `developer` history entries are flattened into one top-level `system` string before forwarding. Claude Code's beta `context_management` extension is omitted because compatible gateways may reject it. For the default `openai-chat` protocol, it calls `.../ai/v1/chat/completions` and uses the OpenAI translator. Both authenticate with `Authorization: Bearer $CF_AIG_TOKEN` and send `cf-aig-gateway-id` to select the configured gateway. Incoming `anthropic-version` and `anthropic-beta` headers are forwarded only on native Anthropic requests; authorization, cookies, and arbitrary client headers are not.
+For `anthropic-messages`, the proxy calls `.../ai/v1/messages` and forwards native Messages tools and message content blocks. For compatibility with gateways that accept only Anthropic's string form, top-level system blocks plus any `system` or `developer` history entries are flattened into one top-level `system` string before forwarding; if a system block carried a `cache_control` breakpoint, it is re-expressed as a top-level `cache_control` so system-prompt caching still works (see [Prompt caching](#prompt-caching-and-cost-control)). Claude Code's beta `context_management` extension is omitted because compatible gateways may reject it. For the default `openai-chat` protocol, it calls `.../ai/v1/chat/completions` and uses the OpenAI translator. Both authenticate with `Authorization: Bearer $CF_AIG_TOKEN` and send `cf-aig-gateway-id` to select the configured gateway. Incoming `anthropic-version` and `anthropic-beta` headers are forwarded only on native Anthropic requests; authorization, cookies, and arbitrary client headers are not.
 
 The `models` array is the proxy's exact local routing allowlist, not a catalog fetched from Cloudflare. Cloudflare's REST API can route available OpenAI, Anthropic, Google, and Workers AI models; update this array when you want to expose another model to Claude Code.
 
@@ -185,7 +185,14 @@ The proxy's `[1m]`-suffix normalization (`normalize_incoming_model`) strips the 
 
 ## Prompt caching and cost control
 
-When you point Claude Code at a gateway with your own API key, you pay per token, so keeping Anthropic's automatic prompt caching intact matters. Be aware of one gateway limitation: the Cloudflare AI Gateway requires the `anthropic-messages` `system` field to be a plain string, so the proxy flattens structured system blocks and **system-level `cache_control` breakpoints cannot be sent through it**. Caching of conversation/message content is unaffected. If you need full system-prompt caching, route to a backend that accepts the native Anthropic schema (structured `system` with `cache_control`) rather than Cloudflare's gateway.
+When you point Claude Code at a gateway with your own API key, you pay per token, so keeping Anthropic's automatic prompt caching intact matters. Prompt caching **does work** through the Cloudflare AI Gateway, with one nuance worth understanding.
+
+Anthropic prompt caching is *prefix-based*: a `cache_control` breakpoint caches everything before it in the request (tools → system → messages, in that order). The Cloudflare gateway requires the `anthropic-messages` `system` field to be a plain string, so a `cache_control` breakpoint placed *on a system block* cannot be sent as-is. To avoid silently dropping system-prompt caching, the proxy **re-expresses that breakpoint as a top-level `cache_control`** (preserving the client's TTL) when — and only when — the client asked for system caching. The gateway accepts top-level `cache_control`, and because it auto-applies a breakpoint to the last cacheable block, the whole prefix (including the flattened system string) is cached. `cache_control` markers on tools and message content blocks are forwarded unchanged and cache on their own. Net effect: Claude Code's caching, including the system prompt, is preserved.
+
+Two caveats:
+
+- The gateway does **not** return `cache_creation_input_tokens` / `cache_read_input_tokens` in its usage object, so cache activity is invisible in reported usage even though the savings are real (cached tokens drop out of `input_tokens`).
+- Caching only kicks in above Anthropic's minimum cacheable prefix (~1024 tokens for Sonnet/Opus, ~2048 for Haiku); shorter prefixes are billed in full regardless.
 
 To keep caching effective and background traffic cheap, on the Claude Code side:
 
@@ -230,7 +237,7 @@ The proxy validates the provider catalog at startup. It does not require every c
 Choose a protocol per entry:
 
 - `openai-chat` (the default) requires `POST <baseUrl>/chat/completions`, standard Chat Completions messages/function tools, JSON responses, and OpenAI-style SSE chunks ending in `[DONE]`. Requests and responses are translated.
-- `anthropic-messages` requires `POST <baseUrl>/messages`. Anthropic request JSON and JSON/SSE response bodies pass through natively, while only safe response headers are copied. Note that the Cloudflare gateway's validator is stricter than `api.anthropic.com`: it requires `system` to be a plain string (structured system arrays are rejected), so the proxy flattens system blocks and drops the `context_management` beta field. A side effect is that system-level `cache_control` breakpoints cannot be sent through the gateway.
+- `anthropic-messages` requires `POST <baseUrl>/messages`. Anthropic request JSON and JSON/SSE response bodies pass through natively, while only safe response headers are copied. Note that the Cloudflare gateway's validator is stricter than `api.anthropic.com`: it requires `system` to be a plain string (structured system arrays are rejected), so the proxy flattens system blocks and drops the `context_management` beta field. A `cache_control` breakpoint on a system block is re-expressed as a top-level `cache_control` so system-prompt caching is preserved through the gateway.
 
 Both protocols use bearer-token authentication and configured literal headers. Token counting is an approximation performed locally and does not call the upstream API. The OpenAI translator recognizes `reasoning_content` and `reasoning` response fields in addition to standard text and tool calls.
 

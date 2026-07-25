@@ -234,17 +234,28 @@ impl Provider for OpenAiCompatibleProvider {
 ///   are not permitted` (even though the paired `anthropic-beta` header is
 ///   forwarded), so it is dropped.
 ///
-/// A consequence is that system-level `cache_control` breakpoints cannot be
-/// expressed through this gateway — system-prompt prompt caching is simply not
-/// available on the `anthropic-messages` path. Message content is forwarded
-/// unchanged. Making these transforms conditional for a stricter-vs-permissive
-/// backend is tracked as a follow-up.
+/// Because `system` must be a plain string, a `cache_control` breakpoint placed
+/// *on a system block* cannot survive the flatten. Anthropic prompt caching is
+/// prefix-based, though, and the gateway does accept a top-level `cache_control`
+/// field (confirmed live: it drops the cached prefix out of `input_tokens`). So
+/// when the client marked the system prompt for caching, we re-express that as a
+/// top-level `cache_control`, which auto-applies a breakpoint to the last
+/// cacheable block and thereby caches the whole prefix — the stringified system
+/// included. This is only done when the client actually asked for system
+/// caching, so one-shot clients never pay cache-write costs they did not request.
+/// `cache_control` markers on tool and message content blocks are forwarded
+/// unchanged and continue to work through the gateway on their own.
+///
+/// Note: the gateway does not report `cache_creation_input_tokens` /
+/// `cache_read_input_tokens`, so cache activity is invisible in usage even
+/// though the savings are real (cached tokens leave `input_tokens`).
 fn normalize_anthropic_messages(mut body: MessagesRequest) -> Result<MessagesRequest> {
     body.extra.remove("context_management");
 
     let mut system_text = Vec::new();
+    let mut system_cache_control: Option<serde_json::Value> = None;
     if let Some(system) = body.extra.remove("system") {
-        append_system_text(&mut system_text, system)?;
+        append_system_text(&mut system_text, &mut system_cache_control, system)?;
     }
 
     let mut messages = Vec::with_capacity(body.messages.len());
@@ -252,7 +263,7 @@ fn normalize_anthropic_messages(mut body: MessagesRequest) -> Result<MessagesReq
         match message.role.as_str() {
             "user" | "assistant" => messages.push(message),
             "system" | "developer" => {
-                append_system_text(&mut system_text, message.content)?;
+                append_system_text(&mut system_text, &mut system_cache_control, message.content)?;
             }
             role => bail!("unexpected message role for Anthropic Messages: {role}"),
         }
@@ -264,10 +275,23 @@ fn normalize_anthropic_messages(mut body: MessagesRequest) -> Result<MessagesReq
             serde_json::Value::String(system_text.join("\n\n")),
         );
     }
+    // Recover system-prompt caching that the string-collapse above would
+    // otherwise destroy. Reuse the client's own cache_control value so its TTL
+    // (5m/1h) is preserved, and never override a top-level marker the client
+    // already set.
+    if let Some(cache_control) = system_cache_control {
+        body.extra
+            .entry("cache_control".to_string())
+            .or_insert(cache_control);
+    }
     Ok(body)
 }
 
-fn append_system_text(out: &mut Vec<String>, content: serde_json::Value) -> Result<()> {
+fn append_system_text(
+    out: &mut Vec<String>,
+    cache_control: &mut Option<serde_json::Value>,
+    content: serde_json::Value,
+) -> Result<()> {
     match content {
         serde_json::Value::String(text) => out.push(text),
         serde_json::Value::Array(blocks) => {
@@ -277,6 +301,11 @@ fn append_system_text(out: &mut Vec<String>, content: serde_json::Value) -> Resu
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| anyhow!("Anthropic system blocks must contain text"))?;
                 out.push(text.to_string());
+                // Keep the last system-block breakpoint so it can be re-expressed
+                // as a top-level cache_control after the flatten (see caller).
+                if let Some(cc) = block.get("cache_control") {
+                    *cache_control = Some(cc.clone());
+                }
             }
         }
         _ => bail!("Anthropic system content must be a string or content block array"),
@@ -508,3 +537,72 @@ impl CliHandlers for OpenAiCompatibleCli {
 }
 
 static OPENAI_COMPATIBLE_CLI: OpenAiCompatibleCli = OpenAiCompatibleCli;
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn normalize(value: serde_json::Value) -> serde_json::Value {
+        let body: MessagesRequest = serde_json::from_value(value).unwrap();
+        let normalized = normalize_anthropic_messages(body).unwrap();
+        serde_json::to_value(normalized).unwrap()
+    }
+
+    #[test]
+    fn system_cache_control_is_recovered_as_top_level_marker() {
+        // A cache_control breakpoint on a system block cannot survive the
+        // flatten to a plain string, so it is re-expressed as a top-level
+        // cache_control (preserving the client's TTL) to keep the prefix cached.
+        let out = normalize(json!({
+            "model": "anthropic/claude-sonnet-5",
+            "system": [
+                {"type": "text", "text": "be concise"},
+                {"type": "text", "text": "cite files", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+            ],
+            "messages": [{"role": "user", "content": "hi"}]
+        }));
+        assert_eq!(out["system"], "be concise\n\ncite files");
+        assert_eq!(
+            out["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+    }
+
+    #[test]
+    fn no_system_cache_control_means_no_forced_caching() {
+        // Clients that did not ask for caching must not be charged cache-write
+        // costs: no top-level cache_control is synthesized.
+        let out = normalize(json!({
+            "model": "anthropic/claude-sonnet-5",
+            "system": [{"type": "text", "text": "be concise"}],
+            "messages": [{"role": "user", "content": "hi"}]
+        }));
+        assert_eq!(out["system"], "be concise");
+        assert!(out.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn existing_top_level_cache_control_is_not_overridden() {
+        let out = normalize(json!({
+            "model": "anthropic/claude-sonnet-5",
+            "cache_control": {"type": "ephemeral", "ttl": "5m"},
+            "system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+            "messages": [{"role": "user", "content": "hi"}]
+        }));
+        assert_eq!(
+            out["cache_control"],
+            json!({"type": "ephemeral", "ttl": "5m"})
+        );
+    }
+
+    #[test]
+    fn context_management_is_dropped() {
+        let out = normalize(json!({
+            "model": "anthropic/claude-sonnet-5",
+            "context_management": {"edits": []},
+            "messages": [{"role": "user", "content": "hi"}]
+        }));
+        assert!(out.get("context_management").is_none());
+    }
+}
