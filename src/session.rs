@@ -1,5 +1,3 @@
-use crate::config::AliasProvider;
-use crate::registry::normalize_incoming_model;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{LazyLock, Mutex};
 
@@ -9,7 +7,6 @@ pub const MAX_SESSIONS: usize = 10_000;
 #[derive(Debug, Clone)]
 pub struct SessionState {
     pub seq: u64,
-    pub affinity_provider: Option<AliasProvider>,
     pub last_seen: u64,
 }
 
@@ -49,28 +46,18 @@ pub fn existing_session_now(session_id: Option<&str>) -> Option<SessionState> {
 pub fn record_session_request(
     session_id: Option<&str>,
     prior: Option<&SessionState>,
-    provider_name: &str,
-    model: &str,
+    _provider_name: &str,
+    _model: &str,
     now: u64,
 ) -> Option<SessionState> {
     let id = session_id?;
     let mut store = SESSIONS.lock().expect("session lock");
     let mut next = prior.cloned().unwrap_or(SessionState {
         seq: 0,
-        affinity_provider: None,
         last_seen: now,
     });
     next.seq += 1;
     next.last_seen = now;
-    if is_alias_routable_provider(provider_name)
-        && !crate::registry::is_anthropic_alias(normalize_incoming_model(model).as_str())
-    {
-        next.affinity_provider = Some(match provider_name {
-            "codex" => AliasProvider::Codex,
-            "kimi" => AliasProvider::Kimi,
-            _ => next.affinity_provider.unwrap_or(AliasProvider::Codex),
-        });
-    }
 
     if !store.map.contains_key(id) {
         store.order.push_back(id.to_string());
@@ -88,17 +75,9 @@ pub fn record_session_request(
     Some(next)
 }
 
-fn is_alias_routable_provider(name: &str) -> bool {
-    matches!(name, "codex" | "kimi")
-}
-
 #[cfg(test)]
 pub fn reset_sessions_for_test() {
     let mut store = SESSIONS.lock().expect("session lock");
     store.map.clear();
     store.order.clear();
-}
-
-pub fn affinity_provider_from_session(session: &SessionState) -> Option<AliasProvider> {
-    session.affinity_provider
 }

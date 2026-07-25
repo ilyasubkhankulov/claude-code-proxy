@@ -143,11 +143,12 @@ fn run_monitor_events(
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) => match key.code {
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if app.handle_ctrl_c() {
-                            return Ok(MonitorExit::ForceQuit);
-                        }
+                    KeyCode::Char('c')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) && app.handle_ctrl_c() =>
+                    {
+                        return Ok(MonitorExit::ForceQuit);
                     }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
                     _ if app.phase == MonitorPhase::ShuttingDown => {}
                     KeyCode::Char('y') if app.phase == MonitorPhase::ConfirmingShutdown => {
                         app.begin_shutdown()
@@ -1662,11 +1663,12 @@ fn mock_setup_text(port: u16, registry: &Registry) -> String {
 
 pub fn setup_text(port: u16, registry: &Registry) -> String {
     let grouped = registry.grouped_models();
-    let model_summary = ["codex", "kimi", "cursor"]
+    let model_summary = registry
+        .list_provider_names()
         .into_iter()
         .filter_map(|provider| {
             grouped
-                .get(provider)
+                .get(&provider)
                 .map(|models| format!("{provider}: {} models", models.len()))
         })
         .collect::<Vec<_>>()

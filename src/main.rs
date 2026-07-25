@@ -97,7 +97,7 @@ fn main() -> Result<()> {
         Commands::Serve { port, no_monitor } => {
             let bind_address = config::bind_address();
             let effective_port = port.unwrap_or_else(config::port);
-            let registry = Registry::with_default_alias();
+            let registry = Registry::try_with_default_alias()?;
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
@@ -154,11 +154,12 @@ fn main() -> Result<()> {
             }
         }
         Commands::Demo => {
-            let registry = Registry::with_default_alias();
+            let registry = Registry::try_with_default_alias()?;
             tui::run_mock_monitor(config::port(), &registry)
         }
         Commands::Models { full } => {
-            print_models(&Registry::with_default_alias(), full);
+            let registry = Registry::try_with_default_alias()?;
+            print_models(&registry, full);
             Ok(())
         }
         Commands::Codex { command } => run_provider_cli("codex", command),
@@ -183,7 +184,7 @@ fn select_serve_mode(stdout_is_tty: bool, no_monitor: bool) -> ServeMode {
 }
 
 fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
-    let registry = Registry::with_default_alias();
+    let registry = Registry::try_with_default_alias()?;
     let provider = registry
         .provider(name)
         .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
@@ -224,8 +225,16 @@ fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
 
 fn print_models(registry: &Registry, full: bool) {
     let grouped = registry.grouped_models();
-    for provider in ["codex", "kimi", "grok", "cursor"] {
-        let Some(models) = grouped.get(provider) else {
+    let mut providers = vec!["codex".to_string(), "kimi".to_string(), "grok".to_string()];
+    providers.extend(
+        grouped
+            .keys()
+            .filter(|name| !matches!(name.as_str(), "codex" | "kimi" | "grok" | "cursor"))
+            .cloned(),
+    );
+    providers.push("cursor".to_string());
+    for provider in providers {
+        let Some(models) = grouped.get(&provider) else {
             continue;
         };
         if full || provider != "cursor" {

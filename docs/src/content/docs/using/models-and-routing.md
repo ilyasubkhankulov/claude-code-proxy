@@ -13,9 +13,10 @@ The model ID in each request selects its provider. One proxy listener can serve 
 | `kimi-for-coding`, `kimi-k2.6`, `k2.6` | Kimi |
 | `grok-composer-2.5-fast`, `grok-4.5` | Grok |
 | `cursor`, Cursor legacy aliases, `cursor:<id>`, `cursor-plan:<id>`, `cursor-ask:<id>` | Cursor Agent |
+| Exact IDs listed under a custom `openaiCompatible` entry | That configured provider |
 | Anthropic-style aliases such as `haiku`, `sonnet`, `opus`, `fable`, and registered `claude-*` aliases | The `aliasProvider`, Codex by default |
 
-An unknown ID returns HTTP 400 with the supported provider catalog. There is no implicit fallback for arbitrary model names.
+An unknown ID returns HTTP 400 with the supported provider catalog. There is no implicit fallback for arbitrary model names; add compatible IDs explicitly under `openaiCompatible`.
 
 ## Prefer the live catalog
 

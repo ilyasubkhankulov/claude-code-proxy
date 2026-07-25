@@ -91,7 +91,7 @@ pub async fn serve_listener(
             ),
         ])),
     );
-    let app = app_with_monitor(Arc::new(Registry::with_default_alias()), monitor);
+    let app = app_with_monitor(Arc::new(Registry::try_with_default_alias()?), monitor);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await?;
@@ -303,6 +303,7 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
         session_id,
         session_seq: current.map(|state| state.seq),
         provider: "codex".to_string(),
+        anthropic_headers: http::HeaderMap::new(),
         traffic,
         monitor: state.monitor.clone(),
     };
@@ -569,12 +570,7 @@ async fn dispatch_request(
         None
     };
 
-    let provider = state.registry.provider_for_model(
-        &normalized_model,
-        session_state
-            .as_ref()
-            .and_then(|state| state.affinity_provider.as_ref()),
-    );
+    let provider = state.registry.provider_for_model(&normalized_model);
 
     let provider = match provider {
         Some(provider) => provider,
@@ -694,6 +690,7 @@ async fn dispatch_request(
         session_id,
         session_seq: current.map(|s| s.seq),
         provider: provider.name().to_string(),
+        anthropic_headers: forwarded_anthropic_headers(&headers),
         traffic,
         monitor: state.monitor.clone(),
     };
@@ -1014,6 +1011,16 @@ fn monitor_failed(
     if let Some(monitor) = monitor {
         monitor.request_failed(req_id, status.map(|status| status.as_u16()), error);
     }
+}
+
+fn forwarded_anthropic_headers(headers: &http::HeaderMap) -> http::HeaderMap {
+    let mut forwarded = http::HeaderMap::new();
+    for name in ["anthropic-version", "anthropic-beta"] {
+        for value in headers.get_all(name) {
+            forwarded.append(http::HeaderName::from_static(name), value.clone());
+        }
+    }
+    forwarded
 }
 
 fn headers_to_record(headers: &http::HeaderMap) -> Value {

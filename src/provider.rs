@@ -3,7 +3,7 @@ use crate::monitor::MonitorHandle;
 use crate::traffic::TrafficCapture;
 use anyhow::Result;
 use async_trait::async_trait;
-use axum::response::Response;
+use axum::{http::HeaderMap, response::Response};
 use clap::Subcommand;
 use std::sync::Arc;
 
@@ -21,7 +21,7 @@ pub enum AuthCommand {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
     fn supported_models(&self) -> Vec<String>;
     fn cli(&self) -> &'static dyn CliHandlers;
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response;
@@ -41,6 +41,7 @@ pub struct RequestContext {
     pub session_id: Option<String>,
     pub session_seq: Option<u64>,
     pub provider: String,
+    pub anthropic_headers: HeaderMap,
     pub traffic: Option<Arc<TrafficCapture>>,
     pub monitor: Option<MonitorHandle>,
 }

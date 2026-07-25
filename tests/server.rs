@@ -444,9 +444,26 @@ async fn models_endpoint_lists_supported_models() {
 #[tokio::test]
 async fn models_endpoint_includes_claude_prefixed_aliases_for_discovery() {
     // Claude Code's gateway model discovery ignores ids that don't start with
-    // "claude" or "anthropic", so the alias entries are what make
-    // CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 useful at all.
-    let app = app(Arc::new(Registry::with_default_alias()));
+    // "claude" or "anthropic". Under passthrough routing a recognized id is
+    // advertised only when a configured provider explicitly claims it (here via
+    // a modelRewrites key), which is what makes discovery useful for a gateway.
+    use claude_code_proxy::config::{CompatibleProtocol, OpenAiCompatibleProviderConfig};
+    use std::collections::BTreeMap;
+
+    let registry = Registry::new_with_openai_compatible(vec![OpenAiCompatibleProviderConfig {
+        name: "cloudflare-anthropic".into(),
+        base_url: "https://api.cloudflare.com/client/v4/accounts/test/ai/v1".into(),
+        api_key_env: "CF_AIG_TOKEN".into(),
+        models: vec!["anthropic/claude-sonnet-5".into()],
+        protocol: CompatibleProtocol::AnthropicMessages,
+        headers: BTreeMap::new(),
+        model_rewrites: BTreeMap::from([(
+            "claude-opus-4-8".into(),
+            "anthropic/claude-opus-4.8".into(),
+        )]),
+    }])
+    .unwrap();
+    let app = app(Arc::new(registry));
     let (status, value) = get_models(app, "/v1/models?limit=1000").await;
 
     assert_eq!(status, StatusCode::OK);
@@ -457,6 +474,7 @@ async fn models_endpoint_includes_claude_prefixed_aliases_for_discovery() {
         .map(|m| m["id"].as_str().unwrap())
         .collect();
     assert!(ids.iter().any(|id| id.starts_with("claude-")));
+    assert!(ids.contains(&"claude-opus-4-8"));
 }
 
 #[tokio::test]

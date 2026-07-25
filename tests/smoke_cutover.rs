@@ -583,7 +583,7 @@ fn smoke_kimi_model_is_registered() {
     // dropped from an async context (it joins a dedicated runtime thread).
     // Test routing at the Registry level instead of through the HTTP stack.
     let registry = Registry::with_default_alias();
-    let provider = registry.provider_for_model("kimi-for-coding", None);
+    let provider = registry.provider_for_model("kimi-for-coding");
     assert!(
         provider.is_some(),
         "kimi-for-coding must resolve to a registered provider"

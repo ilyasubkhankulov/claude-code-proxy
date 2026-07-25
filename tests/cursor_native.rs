@@ -170,14 +170,13 @@ fn model_resolution_accepts_legacy_cursor_agent() {
 #[test]
 fn registry_routes_cursor_model_to_cursor_provider() {
     use claude_code_proxy::Registry;
-    use claude_code_proxy::config::AliasProvider;
 
-    let registry = Registry::new(AliasProvider::Codex);
-    let provider = registry.provider_for_model("cursor:gpt-5.5", None);
+    let registry = Registry::new();
+    let provider = registry.provider_for_model("cursor:gpt-5.5");
     assert!(provider.is_some());
     assert_eq!(provider.unwrap().name(), "cursor");
 
-    let provider = registry.provider_for_model("cursor-agent", None);
+    let provider = registry.provider_for_model("cursor-agent");
     assert!(provider.is_some());
     assert_eq!(provider.unwrap().name(), "cursor");
 }
@@ -647,9 +646,8 @@ fn sse_message_delta_contains_usage() {
 #[test]
 fn registry_provider_for_legacy_cursor_model() {
     use claude_code_proxy::Registry;
-    use claude_code_proxy::config::AliasProvider;
 
-    let registry = Registry::new(AliasProvider::Codex);
+    let registry = Registry::new();
 
     // Legacy models
     for model in &[
@@ -660,7 +658,7 @@ fn registry_provider_for_legacy_cursor_model() {
         "cursor-plan",
         "cursor-ask",
     ] {
-        let provider = registry.provider_for_model(model, None);
+        let provider = registry.provider_for_model(model);
         assert!(
             provider.is_some(),
             "expected provider for legacy model {model}"
@@ -879,6 +877,7 @@ async fn cursor_provider_handle_messages_returns_anthropic_json() {
         session_id: None,
         session_seq: None,
         provider: "cursor".into(),
+        anthropic_headers: http::HeaderMap::new(),
         traffic: None,
         monitor: None,
     };
