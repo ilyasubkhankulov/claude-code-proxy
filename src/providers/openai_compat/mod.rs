@@ -23,7 +23,7 @@ use crate::anthropic::{
     schema::{CountTokensResponse, MessagesRequest},
 };
 use crate::config::CompatibleProtocol;
-use crate::monitor::MonitorHandle;
+use crate::monitor::{MonitorHandle, cache_usage_from_anthropic_sse, usage_from_anthropic_sse};
 use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::registry::normalize_incoming_model;
 
@@ -194,6 +194,15 @@ impl Provider for OpenAiCompatibleProvider {
                                 .pointer("/usage/output_tokens")
                                 .and_then(|v| v.as_u64()),
                         );
+                        monitor.cache_usage_updated(
+                            &ctx.req_id,
+                            value
+                                .pointer("/usage/cache_read_input_tokens")
+                                .and_then(|v| v.as_u64()),
+                            value
+                                .pointer("/usage/cache_creation_input_tokens")
+                                .and_then(|v| v.as_u64()),
+                        );
                     }
                     (StatusCode::OK, Json(value)).into_response()
                 }
@@ -335,6 +344,14 @@ async fn native_response(
                 }
                 if let Some(monitor) = monitor.as_ref() {
                     monitor.stream_progress(&req_id, bytes.len() as u64, 1, None, None);
+                    let (input, output) = usage_from_anthropic_sse(bytes);
+                    if input.is_some() || output.is_some() {
+                        monitor.usage_updated(&req_id, input, output);
+                    }
+                    let (cache_read, cache_creation) = cache_usage_from_anthropic_sse(bytes);
+                    if cache_read.is_some() || cache_creation.is_some() {
+                        monitor.cache_usage_updated(&req_id, cache_read, cache_creation);
+                    }
                 }
             }
             chunk
@@ -360,6 +377,14 @@ async fn native_response(
     {
         monitor.generation_started(&req_id);
         monitor.stream_progress(&req_id, bytes.len() as u64, 1, None, None);
+        let (input, output) = usage_from_anthropic_sse(&bytes);
+        if input.is_some() || output.is_some() {
+            monitor.usage_updated(&req_id, input, output);
+        }
+        let (cache_read, cache_creation) = cache_usage_from_anthropic_sse(&bytes);
+        if cache_read.is_some() || cache_creation.is_some() {
+            monitor.cache_usage_updated(&req_id, cache_read, cache_creation);
+        }
     }
     let mut response = Response::new(Body::from(bytes));
     *response.status_mut() = status;

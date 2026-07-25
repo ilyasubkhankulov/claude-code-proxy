@@ -93,6 +93,8 @@ fn mock_state_for_tick(
     streaming.stream_chunks = 96;
     streaming.input_tokens = Some(12_480);
     streaming.output_tokens = Some(420);
+    streaming.cache_read_tokens = Some(9_600);
+    streaming.cache_creation_tokens = Some(2_048);
     streaming.traffic_capture_path = Some(PathBuf::from(
         "/tmp/claude-code-proxy-demo/traffic/req-active-codex",
     ));
@@ -198,6 +200,8 @@ fn mock_state_for_tick(
     success.stream_chunks = 142;
     success.input_tokens = Some(125_600);
     success.output_tokens = Some(832);
+    success.cache_read_tokens = Some(118_400);
+    success.cache_creation_tokens = Some(6_144);
     success.traffic_capture_path = Some(PathBuf::from(
         "/tmp/claude-code-proxy-demo/traffic/req-complete-codex",
     ));
@@ -657,6 +661,8 @@ fn active_request(
         stream_chunks: 0,
         input_tokens: None,
         output_tokens: None,
+        cache_read_tokens: None,
+        cache_creation_tokens: None,
         error: None,
         traffic_capture_path: None,
     }
@@ -698,6 +704,8 @@ fn completed_request(
         stream_chunks: 0,
         input_tokens: None,
         output_tokens: None,
+        cache_read_tokens: None,
+        cache_creation_tokens: None,
         error: None,
         traffic_capture_path: None,
     }

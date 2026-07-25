@@ -105,6 +105,11 @@ pub enum MonitorEvent {
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
     },
+    CacheUsageUpdated {
+        request_id: String,
+        cache_read_tokens: Option<u64>,
+        cache_creation_tokens: Option<u64>,
+    },
     RequestCompleted {
         request_id: String,
         http_status: u16,
@@ -144,6 +149,8 @@ pub struct ActiveRequest {
     pub stream_chunks: u64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_creation_tokens: Option<u64>,
     pub error: Option<String>,
     pub traffic_capture_path: Option<PathBuf>,
 }
@@ -188,6 +195,8 @@ pub struct CompletedRequest {
     pub stream_chunks: u64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_creation_tokens: Option<u64>,
     pub error: Option<String>,
     pub traffic_capture_path: Option<PathBuf>,
 }
@@ -247,6 +256,8 @@ pub struct SessionSummary {
     pub last_seen: SystemTime,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
     pub output_token_samples: Vec<(SystemTime, u64)>,
     rate_output_tokens: u64,
     pub generation_duration: Duration,
@@ -427,6 +438,23 @@ impl MonitorHandle {
         });
     }
 
+    /// Report Anthropic prompt-cache token counts for a request. Reported
+    /// separately from `usage_updated` so the many providers that call
+    /// `usage_updated` need no signature change; only backends that surface
+    /// `cache_read_input_tokens` / `cache_creation_input_tokens` call this.
+    pub fn cache_usage_updated(
+        &self,
+        request_id: impl Into<String>,
+        cache_read_tokens: Option<u64>,
+        cache_creation_tokens: Option<u64>,
+    ) {
+        self.publish(MonitorEvent::CacheUsageUpdated {
+            request_id: request_id.into(),
+            cache_read_tokens,
+            cache_creation_tokens,
+        });
+    }
+
     pub fn request_completed(
         &self,
         request_id: impl Into<String>,
@@ -495,6 +523,8 @@ impl MonitorStore {
                         stream_chunks: 0,
                         input_tokens: None,
                         output_tokens: None,
+                        cache_read_tokens: None,
+                        cache_creation_tokens: None,
                         error: None,
                         traffic_capture_path: None,
                     },
@@ -666,6 +696,25 @@ impl MonitorStore {
                     self.record_session_output(session_id, timestamp, tokens);
                 }
             }
+            MonitorEvent::CacheUsageUpdated {
+                request_id,
+                cache_read_tokens,
+                cache_creation_tokens,
+            } => {
+                if let Some(active) = self.active.get_mut(&request_id) {
+                    active.cache_read_tokens = cache_read_tokens.or(active.cache_read_tokens);
+                    active.cache_creation_tokens =
+                        cache_creation_tokens.or(active.cache_creation_tokens);
+                } else if let Some(completed) = self
+                    .recent
+                    .iter_mut()
+                    .find(|request| request.request_id == request_id)
+                {
+                    completed.cache_read_tokens = cache_read_tokens.or(completed.cache_read_tokens);
+                    completed.cache_creation_tokens =
+                        cache_creation_tokens.or(completed.cache_creation_tokens);
+                }
+            }
             MonitorEvent::RequestCompleted {
                 request_id,
                 http_status,
@@ -762,6 +811,8 @@ impl MonitorStore {
                 stream_chunks: 0,
                 input_tokens: None,
                 output_tokens: None,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
                 error: None,
                 traffic_capture_path: None,
             });
@@ -794,6 +845,8 @@ impl MonitorStore {
             stream_chunks: active.stream_chunks,
             input_tokens: input_tokens.or(active.input_tokens),
             output_tokens: output_tokens.or(active.output_tokens),
+            cache_read_tokens: active.cache_read_tokens,
+            cache_creation_tokens: active.cache_creation_tokens,
             error: error.or(active.error),
             traffic_capture_path: active.traffic_capture_path,
         };
@@ -860,6 +913,8 @@ fn session_summaries(
                 last_seen: request.finished_at,
                 input_tokens: 0,
                 output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
                 output_token_samples: Vec::new(),
                 rate_output_tokens: 0,
                 generation_duration: Duration::ZERO,
@@ -880,6 +935,12 @@ fn session_summaries(
         entry.output_tokens = entry
             .output_tokens
             .saturating_add(request.output_tokens.unwrap_or(0));
+        entry.cache_read_tokens = entry
+            .cache_read_tokens
+            .saturating_add(request.cache_read_tokens.unwrap_or(0));
+        entry.cache_creation_tokens = entry
+            .cache_creation_tokens
+            .saturating_add(request.cache_creation_tokens.unwrap_or(0));
         if let (Some(tokens), Some(duration)) = (
             request
                 .output_tokens
@@ -910,6 +971,8 @@ fn session_summaries(
                 last_seen: request.started_at,
                 input_tokens: 0,
                 output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
                 output_token_samples: Vec::new(),
                 rate_output_tokens: 0,
                 generation_duration: Duration::ZERO,
@@ -928,6 +991,12 @@ fn session_summaries(
         entry.output_tokens = entry
             .output_tokens
             .saturating_add(request.output_tokens.unwrap_or(0));
+        entry.cache_read_tokens = entry
+            .cache_read_tokens
+            .saturating_add(request.cache_read_tokens.unwrap_or(0));
+        entry.cache_creation_tokens = entry
+            .cache_creation_tokens
+            .saturating_add(request.cache_creation_tokens.unwrap_or(0));
         if let (Some(tokens), Some(duration)) = (
             request
                 .output_tokens
@@ -1003,13 +1072,7 @@ pub fn usage_from_anthropic_sse(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
     let text = String::from_utf8_lossy(bytes);
     let mut input_tokens = None;
     let mut output_tokens = None;
-    for line in text.lines() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(data.trim()) else {
-            continue;
-        };
+    let mut scan = |value: &serde_json::Value| {
         for usage in [
             value.pointer("/usage"),
             value.pointer("/delta/usage"),
@@ -1025,8 +1088,67 @@ pub fn usage_from_anthropic_sse(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
                 output_tokens = Some(tokens);
             }
         }
+    };
+    // Non-stream bodies are a single JSON object; SSE bodies are `data:` lines.
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        scan(&value);
+    }
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(data.trim()) {
+            scan(&value);
+        }
     }
     (input_tokens, output_tokens)
+}
+
+/// Extract Anthropic prompt-cache token counts from a (possibly partial)
+/// Anthropic SSE or JSON body. Returns `(cache_read, cache_creation)`. Kept
+/// separate from [`usage_from_anthropic_sse`] so its existing callers are
+/// undisturbed. Backends that do not report these fields (e.g. the Cloudflare
+/// AI Gateway) simply yield `(None, None)`.
+pub fn cache_usage_from_anthropic_sse(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
+    let text = String::from_utf8_lossy(bytes);
+    let mut cache_read = None;
+    let mut cache_creation = None;
+    let mut scan = |value: &serde_json::Value| {
+        for usage in [
+            value.pointer("/usage"),
+            value.pointer("/delta/usage"),
+            value.pointer("/message/usage"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(tokens) = usage
+                .get("cache_read_input_tokens")
+                .and_then(|value| value.as_u64())
+            {
+                cache_read = Some(tokens);
+            }
+            if let Some(tokens) = usage
+                .get("cache_creation_input_tokens")
+                .and_then(|value| value.as_u64())
+            {
+                cache_creation = Some(tokens);
+            }
+        }
+    };
+    // Non-stream bodies are a single JSON object; SSE bodies are `data:` lines.
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        scan(&value);
+    }
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(data.trim()) {
+            scan(&value);
+        }
+    }
+    (cache_read, cache_creation)
 }
 
 #[cfg(test)]
@@ -1243,6 +1365,68 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
         assert_eq!(usage_from_anthropic_sse(sse), (Some(12), Some(48)));
     }
 
+    #[test]
+    fn cache_usage_extracts_from_message_start_sse() {
+        let sse = br#"event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":0,"cache_read_input_tokens":9600,"cache_creation_input_tokens":2048}}}
+
+event: message_delta
+data: {"type":"message_delta","usage":{"output_tokens":48}}
+
+"#;
+        assert_eq!(
+            cache_usage_from_anthropic_sse(sse),
+            (Some(9600), Some(2048))
+        );
+    }
+
+    #[test]
+    fn cache_usage_extracts_from_non_stream_json_body() {
+        let body =
+            br#"{"type":"message","usage":{"input_tokens":7,"output_tokens":4,"cache_read_input_tokens":3200}}"#;
+        assert_eq!(cache_usage_from_anthropic_sse(body), (Some(3200), None));
+        // The plain usage parser also handles the whole-JSON (non-stream) shape.
+        assert_eq!(usage_from_anthropic_sse(body), (Some(7), Some(4)));
+    }
+
+    #[test]
+    fn cache_usage_absent_yields_none() {
+        let sse = br#"data: {"type":"message_delta","usage":{"output_tokens":48}}
+
+"#;
+        assert_eq!(cache_usage_from_anthropic_sse(sse), (None, None));
+    }
+
+    #[test]
+    fn cache_usage_updates_request_and_session_totals() {
+        let monitor = MonitorHandle::new(10);
+        monitor.request_started(
+            "r1",
+            Some("s1".to_string()),
+            Some(1),
+            EndpointKind::Messages,
+        );
+        monitor.usage_updated("r1", Some(2), Some(4));
+        monitor.cache_usage_updated("r1", Some(9600), Some(2048));
+        // Visible on the active request before completion.
+        let active = monitor.snapshot();
+        assert_eq!(active.active[0].cache_read_tokens, Some(9600));
+        assert_eq!(active.active[0].cache_creation_tokens, Some(2048));
+
+        monitor.request_completed("r1", 200, Some(2), Some(4));
+        let state = monitor.snapshot();
+        let completed = &state.recent[0];
+        assert_eq!(completed.cache_read_tokens, Some(9600));
+        assert_eq!(completed.cache_creation_tokens, Some(2048));
+        let session = state
+            .sessions
+            .iter()
+            .find(|s| s.session_id.as_deref() == Some("s1"))
+            .unwrap();
+        assert_eq!(session.cache_read_tokens, 9600);
+        assert_eq!(session.cache_creation_tokens, 2048);
+    }
+
     fn completed_request(
         request_id: &str,
         session_id: &str,
@@ -1274,6 +1458,8 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
             stream_chunks: 0,
             input_tokens: None,
             output_tokens: Some(output_tokens),
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
             error: None,
             traffic_capture_path: None,
         }

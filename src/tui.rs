@@ -1341,6 +1341,16 @@ fn render_session_detail(
                 DIM_WHITE,
             ),
             detail_line(
+                "cache read",
+                compact_tokens(session.cache_read_tokens),
+                DIM_WHITE,
+            ),
+            detail_line(
+                "cache write",
+                compact_tokens(session.cache_creation_tokens),
+                DIM_WHITE,
+            ),
+            detail_line(
                 "total tokens",
                 format!(
                     "{}/{}",
@@ -1434,6 +1444,18 @@ fn render_request_detail(
                 DIM_WHITE,
             ),
         ];
+        // Cache lines only when a backend actually reports them (the Cloudflare
+        // gateway omits these, so they stay hidden there).
+        if let Some(tokens) = request.cache_read_tokens {
+            lines.push(detail_line("cache read", compact_tokens(tokens), DIM_WHITE));
+        }
+        if let Some(tokens) = request.cache_creation_tokens {
+            lines.push(detail_line(
+                "cache write",
+                compact_tokens(tokens),
+                DIM_WHITE,
+            ));
+        }
         if let Some(error) = request.error.as_deref().filter(|error| !error.is_empty()) {
             lines.push(detail_line("detail", error, YELLOW));
         }
