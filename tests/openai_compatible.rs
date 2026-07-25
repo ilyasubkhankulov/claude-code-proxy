@@ -340,9 +340,11 @@ async fn cloudflare_anthropic_protocol_preserves_native_messages() {
     // The Cloudflare gateway requires `system` to be a plain string (a
     // structured array is rejected with "expected string, received array"), so
     // the proxy flattens system blocks and folds any system-role message in.
-    // System-level cache_control cannot survive this and is not available on
-    // the gateway.
     assert_eq!(request["system"], "be concise\n\nlate system reminder");
+    // A cache_control breakpoint on a system block cannot survive the flatten,
+    // so it is re-expressed as a top-level cache_control. The gateway accepts
+    // this and it caches the whole prefix (stringified system included).
+    assert_eq!(request["cache_control"]["type"], "ephemeral");
     assert_eq!(request["messages"].as_array().unwrap().len(), 1);
     assert_eq!(request["tools"][0]["name"], "lookup");
     assert_eq!(request["thinking"]["type"], "enabled");
