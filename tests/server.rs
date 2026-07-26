@@ -457,6 +457,7 @@ async fn models_endpoint_includes_claude_prefixed_aliases_for_discovery() {
         models: vec!["anthropic/claude-sonnet-5".into()],
         protocol: CompatibleProtocol::AnthropicMessages,
         headers: BTreeMap::new(),
+        cache_ttl: None,
         model_rewrites: BTreeMap::from([(
             "claude-opus-4-8".into(),
             "anthropic/claude-opus-4.8".into(),

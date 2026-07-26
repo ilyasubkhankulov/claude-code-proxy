@@ -202,12 +202,35 @@ To keep caching effective and background traffic cheap, on the Claude Code side:
 - **Cut nonessential traffic** with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (disables auto-updates, telemetry, error reporting, release notes, and background availability/model-discovery refreshes).
 - **Cap output** with `CLAUDE_CODE_MAX_OUTPUT_TOKENS` and thinking with `MAX_THINKING_TOKENS` if you want tighter per-turn ceilings — but keep `CLAUDE_CODE_MAX_OUTPUT_TOKENS` modest, since a large value shrinks usable context before auto-compaction.
 
+### Forcing a longer cache TTL (`cacheTtl`)
+
+Claude Code always writes **5-minute** cache breakpoints. In a real session you routinely idle longer than five minutes — reading output, running tests, thinking — and when the cache lapses the next turn re-reads the entire prefix (tools → system → history) at full price. Anthropic also offers a **1-hour** cache: writes cost 2× base input (vs 1.25× for 5m) but reads stay at 10%. If you idle past five minutes more than about once per session, 1h pays for itself.
+
+Set `cacheTtl` on an `anthropic-messages` provider to rewrite **every** ephemeral `cache_control` breakpoint the proxy forwards (the re-expressed system marker, tool definitions, and message blocks) to a fixed TTL:
+
+```json
+{
+  "openaiCompatible": {
+    "cloudflare-anthropic": {
+      "baseUrl": "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1",
+      "apiKeyEnv": "CF_AIG_TOKEN",
+      "protocol": "anthropic-messages",
+      "headers": { "cf-aig-gateway-id": "<GATEWAY_ID>" },
+      "models": ["anthropic/claude-sonnet-5"],
+      "cacheTtl": "1h"
+    }
+  }
+}
+```
+
+Accepted values are `"5m"` (the default behavior when unset) and `"1h"`. It applies only to the native `anthropic-messages` protocol — setting it on an `openai-chat` provider is a config error rather than a silent no-op. The gateway still omits cache-token counts, so you won't *see* the effect in usage, but idle-gap re-reads drop off your bill. Use `"1h"` for bursty interactive work; leave it unset for tight uninterrupted loops where the 2× write premium on the rolling breakpoints isn't repaid.
+
 ## What Claude Code disables behind a custom base URL
 
 Some Claude Code features are gated on the client side by `ANTHROPIC_BASE_URL` and are switched off whenever the host is not `api.anthropic.com`. The proxy cannot re-enable these — they are decided before any request reaches it:
 
 - **Remote Control** is unavailable through any custom base URL.
-- **MCP tool search** is off by default on a non-first-party host. Re-enable it with `ENABLE_TOOL_SEARCH=true` *only* if your gateway forwards `tool_reference` blocks and serves a model that supports them; otherwise leave it off.
+- **MCP tool search** is off by default on a non-first-party host, but it **works through the Cloudflare gateway**. The native `anthropic-messages` path forwards the `tool_search_tool_regex_*` tool, `defer_loading` tool definitions, and the returned `server_tool_use` / `tool_reference` blocks unchanged, and Cloudflare's Anthropic upstream accepts them (verified end-to-end; no extra `anthropic-beta` header required). Re-enable it with `ENABLE_TOOL_SEARCH=true`. This is also a **cost win**: deferred tool definitions stay out of the cached prefix until the model searches for them, shrinking every request and every cache write — worthwhile once you run several MCP servers.
 - **The WebFetch preflight** and the **fast-mode availability check** call `api.anthropic.com` directly rather than through the proxy. If egress to Anthropic is blocked they can report spurious errors even when inference works. Set `"skipWebFetchPreflight": true` in `settings.json` to skip the preflight.
 
 If your gateway strips the `anthropic-beta` header (this proxy does **not** — it forwards `anthropic-version` and `anthropic-beta` verbatim) you may see `400 Extra inputs are not permitted`; the client-side fallback is `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`.

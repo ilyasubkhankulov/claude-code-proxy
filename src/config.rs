@@ -79,6 +79,13 @@ pub struct OpenAiCompatibleProviderConfig {
     /// client can keep using a Claude-Code-recognized ID (e.g. `claude-opus-4-8`)
     /// while the proxy forwards the gateway's ID (e.g. `anthropic/claude-opus-4.8`).
     pub model_rewrites: BTreeMap<String, String>,
+    /// Optional cache-TTL override for the `anthropic-messages` protocol. When
+    /// set to `"5m"` or `"1h"`, every ephemeral `cache_control` breakpoint the
+    /// proxy forwards to the gateway is rewritten to this TTL. Claude Code only
+    /// ever emits 5-minute breakpoints; forcing `"1h"` keeps Anthropic's prompt
+    /// cache alive across idle gaps longer than five minutes, avoiding a full
+    /// uncached prefix re-read on the next turn.
+    pub cache_ttl: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -94,6 +101,8 @@ struct OpenAiCompatibleFileConfig {
     protocol: CompatibleProtocol,
     #[serde(rename = "modelRewrites", default)]
     model_rewrites: BTreeMap<String, String>,
+    #[serde(rename = "cacheTtl", default)]
+    cache_ttl: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -191,6 +200,7 @@ pub fn openai_compatible_providers() -> Result<Vec<OpenAiCompatibleProviderConfi
             headers: provider.headers,
             protocol: provider.protocol,
             model_rewrites: provider.model_rewrites,
+            cache_ttl: provider.cache_ttl,
         });
     }
 
@@ -249,6 +259,17 @@ fn validate_openai_compatible_provider(
         if seen.contains(from) {
             bail!(
                 "openaiCompatible.{name}.modelRewrites key {from:?} also appears in models; list it in only one place"
+            );
+        }
+    }
+
+    if let Some(ttl) = &provider.cache_ttl {
+        if !matches!(ttl.as_str(), "5m" | "1h") {
+            bail!("openaiCompatible.{name}.cacheTtl must be \"5m\" or \"1h\"");
+        }
+        if provider.protocol != CompatibleProtocol::AnthropicMessages {
+            bail!(
+                "openaiCompatible.{name}.cacheTtl is only supported with protocol \"anthropic-messages\""
             );
         }
     }
@@ -1103,6 +1124,40 @@ mod tests {
         std::fs::write(
             config.path().join("config.json"),
             r#"{"openaiCompatible":{"cloudflare":{"baseUrl":"https://example.com/v1","apiKeyEnv":"KEY","models":["claude-opus-4-8"],"modelRewrites":{"claude-opus-4-8":"anthropic/claude-opus-4.8"}}}}"#,
+        )
+        .unwrap();
+        assert!(openai_compatible_providers().is_err());
+    }
+
+    #[test]
+    fn openai_compatible_config_validates_cache_ttl() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let config = tempfile::TempDir::new().unwrap();
+        let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+
+        // Valid 1h TTL on an anthropic-messages provider loads through.
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"cf":{"baseUrl":"https://example.com/v1","apiKeyEnv":"KEY","protocol":"anthropic-messages","models":["anthropic/claude-sonnet-5"],"cacheTtl":"1h"}}}"#,
+        )
+        .unwrap();
+        let providers = openai_compatible_providers().unwrap();
+        assert_eq!(providers[0].cache_ttl.as_deref(), Some("1h"));
+
+        // Unsupported TTL value is rejected.
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"cf":{"baseUrl":"https://example.com/v1","apiKeyEnv":"KEY","protocol":"anthropic-messages","models":["x"],"cacheTtl":"30m"}}}"#,
+        )
+        .unwrap();
+        assert!(openai_compatible_providers().is_err());
+
+        // cacheTtl on the default openai-chat protocol is rejected (it would be a
+        // silent no-op otherwise).
+        std::fs::write(
+            config.path().join("config.json"),
+            r#"{"openaiCompatible":{"cf":{"baseUrl":"https://example.com/v1","apiKeyEnv":"KEY","models":["x"],"cacheTtl":"1h"}}}"#,
         )
         .unwrap();
         assert!(openai_compatible_providers().is_err());

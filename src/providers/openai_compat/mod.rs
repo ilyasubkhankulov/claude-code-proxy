@@ -33,10 +33,12 @@ pub struct OpenAiCompatibleProvider {
     models: Vec<String>,
     protocol: CompatibleProtocol,
     model_rewrites: std::collections::BTreeMap<String, String>,
+    cache_ttl: Option<String>,
     client: Arc<client::OpenAiClient>,
 }
 
 impl OpenAiCompatibleProvider {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         base_url: String,
@@ -45,6 +47,7 @@ impl OpenAiCompatibleProvider {
         protocol: CompatibleProtocol,
         headers: HeaderMap,
         model_rewrites: std::collections::BTreeMap<String, String>,
+        cache_ttl: Option<String>,
     ) -> Self {
         Self {
             name,
@@ -52,6 +55,7 @@ impl OpenAiCompatibleProvider {
             models,
             protocol,
             model_rewrites,
+            cache_ttl,
             client: Arc::new(client::OpenAiClient::new(base_url, headers)),
         }
     }
@@ -125,16 +129,17 @@ impl Provider for OpenAiCompatibleProvider {
             }
         };
         if self.protocol == CompatibleProtocol::AnthropicMessages {
-            let mut native_body = match normalize_anthropic_messages(body) {
-                Ok(body) => body,
-                Err(error) => {
-                    return json_error(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_request_error",
-                        error.to_string(),
-                    );
-                }
-            };
+            let mut native_body =
+                match normalize_anthropic_messages(body, self.cache_ttl.as_deref()) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        return json_error(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error",
+                            error.to_string(),
+                        );
+                    }
+                };
             native_body.model = Some(upstream_model);
             let upstream = match self
                 .client
@@ -258,7 +263,15 @@ impl Provider for OpenAiCompatibleProvider {
 /// Note: the gateway does not report `cache_creation_input_tokens` /
 /// `cache_read_input_tokens`, so cache activity is invisible in usage even
 /// though the savings are real (cached tokens leave `input_tokens`).
-fn normalize_anthropic_messages(mut body: MessagesRequest) -> Result<MessagesRequest> {
+///
+/// When `cache_ttl` is `Some` (from the provider's `cacheTtl` config), every
+/// ephemeral `cache_control` breakpoint in the outgoing request is rewritten to
+/// that TTL. Claude Code only ever emits 5-minute breakpoints; forcing `"1h"`
+/// keeps the cache warm across idle gaps longer than five minutes.
+fn normalize_anthropic_messages(
+    mut body: MessagesRequest,
+    cache_ttl: Option<&str>,
+) -> Result<MessagesRequest> {
     body.extra.remove("context_management");
 
     let mut system_text = Vec::new();
@@ -293,7 +306,62 @@ fn normalize_anthropic_messages(mut body: MessagesRequest) -> Result<MessagesReq
             .entry("cache_control".to_string())
             .or_insert(cache_control);
     }
+    // Optionally force every ephemeral breakpoint to a configured TTL so long
+    // idle gaps don't drop Anthropic's prompt cache (see `cacheTtl` config).
+    if let Some(ttl) = cache_ttl {
+        force_cache_ttl(&mut body, ttl);
+    }
     Ok(body)
+}
+
+/// Rewrite every ephemeral `cache_control` breakpoint in the request to `ttl`
+/// (`"5m"` or `"1h"`): the re-expressed top-level marker, tool definitions, and
+/// message content blocks. Non-ephemeral markers are left untouched.
+fn force_cache_ttl(body: &mut MessagesRequest, ttl: &str) {
+    // The top-level marker sits directly under the `cache_control` key, so it is
+    // not reached by the "look for a nested cache_control field" walk below.
+    if let Some(cache_control) = body.extra.get_mut("cache_control") {
+        set_ephemeral_ttl(cache_control, ttl);
+    }
+    for value in body.extra.values_mut() {
+        rewrite_cache_control_ttl(value, ttl);
+    }
+    for message in &mut body.messages {
+        rewrite_cache_control_ttl(&mut message.content, ttl);
+    }
+}
+
+/// Set `ttl` on a `cache_control` object, but only when it is `ephemeral`.
+fn set_ephemeral_ttl(cache_control: &mut serde_json::Value, ttl: &str) {
+    let Some(object) = cache_control.as_object_mut() else {
+        return;
+    };
+    if object.get("type").and_then(serde_json::Value::as_str) == Some("ephemeral") {
+        object.insert(
+            "ttl".to_string(),
+            serde_json::Value::String(ttl.to_string()),
+        );
+    }
+}
+
+/// Recursively find every nested `cache_control` breakpoint and force its TTL.
+fn rewrite_cache_control_ttl(value: &mut serde_json::Value, ttl: &str) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(cache_control) = map.get_mut("cache_control") {
+                set_ephemeral_ttl(cache_control, ttl);
+            }
+            for child in map.values_mut() {
+                rewrite_cache_control_ttl(child, ttl);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                rewrite_cache_control_ttl(item, ttl);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn append_system_text(
@@ -570,7 +638,13 @@ mod normalize_tests {
 
     fn normalize(value: serde_json::Value) -> serde_json::Value {
         let body: MessagesRequest = serde_json::from_value(value).unwrap();
-        let normalized = normalize_anthropic_messages(body).unwrap();
+        let normalized = normalize_anthropic_messages(body, None).unwrap();
+        serde_json::to_value(normalized).unwrap()
+    }
+
+    fn normalize_with_ttl(value: serde_json::Value, ttl: &str) -> serde_json::Value {
+        let body: MessagesRequest = serde_json::from_value(value).unwrap();
+        let normalized = normalize_anthropic_messages(body, Some(ttl)).unwrap();
         serde_json::to_value(normalized).unwrap()
     }
 
@@ -629,5 +703,66 @@ mod normalize_tests {
             "messages": [{"role": "user", "content": "hi"}]
         }));
         assert!(out.get("context_management").is_none());
+    }
+
+    #[test]
+    fn cache_ttl_override_rewrites_every_ephemeral_breakpoint() {
+        // A client sending 5m breakpoints on system, tools, and a message block
+        // should have all of them bumped to the configured 1h TTL.
+        let out = normalize_with_ttl(
+            json!({
+                "model": "anthropic/claude-sonnet-5",
+                "system": [{"type": "text", "text": "rules", "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
+                "tools": [{"name": "search", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral"}}],
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral", "ttl": "5m"}}]
+                }]
+            }),
+            "1h",
+        );
+        // Re-expressed top-level system marker.
+        assert_eq!(out["cache_control"]["ttl"], "1h");
+        // Tool breakpoint (had no ttl) is now explicit 1h.
+        assert_eq!(out["tools"][0]["cache_control"]["ttl"], "1h");
+        // Message-block breakpoint bumped from 5m to 1h.
+        assert_eq!(
+            out["messages"][0]["content"][0]["cache_control"]["ttl"],
+            "1h"
+        );
+    }
+
+    #[test]
+    fn cache_ttl_override_absent_leaves_ttls_untouched() {
+        let out = normalize(json!({
+            "model": "anthropic/claude-sonnet-5",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral", "ttl": "5m"}}]
+            }]
+        }));
+        assert_eq!(
+            out["messages"][0]["content"][0]["cache_control"]["ttl"],
+            "5m"
+        );
+    }
+
+    #[test]
+    fn cache_ttl_override_ignores_non_ephemeral_markers() {
+        let out = normalize_with_ttl(
+            json!({
+                "model": "anthropic/claude-sonnet-5",
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hi", "cache_control": {"type": "persistent"}}]
+                }]
+            }),
+            "1h",
+        );
+        // Non-ephemeral cache_control must not gain an ephemeral-only ttl.
+        assert_eq!(
+            out["messages"][0]["content"][0]["cache_control"],
+            json!({"type": "persistent"})
+        );
     }
 }

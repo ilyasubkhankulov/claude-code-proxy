@@ -109,6 +109,7 @@ impl Registry {
                             provider.protocol,
                             headers,
                             provider.model_rewrites.clone(),
+                            provider.cache_ttl.clone(),
                         ),
                     )
                 }
@@ -304,6 +305,7 @@ mod tests {
             models: vec!["anthropic/claude-sonnet-5".to_string()],
             protocol: CompatibleProtocol::AnthropicMessages,
             headers: BTreeMap::new(),
+            cache_ttl: None,
             model_rewrites: BTreeMap::from([(
                 "claude-opus-4-8".to_string(),
                 "anthropic/claude-opus-4.8".to_string(),
@@ -389,6 +391,7 @@ mod tests {
             models: vec!["moonshotai/kimi-k2.7-code".to_string()],
             protocol: Default::default(),
             headers: BTreeMap::new(),
+            cache_ttl: None,
             model_rewrites: BTreeMap::new(),
         }])
         .unwrap();
@@ -408,6 +411,7 @@ mod tests {
                 models: vec!["shared/model".to_string()],
                 protocol: Default::default(),
                 headers: BTreeMap::new(),
+                cache_ttl: None,
                 model_rewrites: BTreeMap::new(),
             },
             OpenAiCompatibleProviderConfig {
@@ -417,6 +421,7 @@ mod tests {
                 models: vec!["shared/model".to_string()],
                 protocol: Default::default(),
                 headers: BTreeMap::new(),
+                cache_ttl: None,
                 model_rewrites: BTreeMap::new(),
             },
         ]);
@@ -434,6 +439,7 @@ mod tests {
                 models: vec!["one/model".to_string()],
                 protocol: Default::default(),
                 headers: BTreeMap::new(),
+                cache_ttl: None,
                 model_rewrites: BTreeMap::from([(
                     "claude-opus-4-8".to_string(),
                     "one/opus".to_string(),
@@ -446,6 +452,7 @@ mod tests {
                 models: vec!["two/model".to_string()],
                 protocol: Default::default(),
                 headers: BTreeMap::new(),
+                cache_ttl: None,
                 model_rewrites: BTreeMap::from([(
                     "claude-opus-4-8".to_string(),
                     "two/opus".to_string(),
@@ -464,6 +471,7 @@ mod tests {
             models: vec!["gpt-5.5".to_string()],
             protocol: Default::default(),
             headers: BTreeMap::new(),
+            cache_ttl: None,
             model_rewrites: BTreeMap::new(),
         }]);
         assert!(result.is_err());
@@ -478,6 +486,7 @@ mod tests {
             models: vec!["custom/model".to_string()],
             protocol: Default::default(),
             headers: BTreeMap::from([("Authorization".to_string(), "secret".to_string())]),
+            cache_ttl: None,
             model_rewrites: BTreeMap::new(),
         }]);
         let error = result

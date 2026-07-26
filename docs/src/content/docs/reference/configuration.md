@@ -126,6 +126,7 @@ All keys are optional. Invalid `openaiCompatible` definitions or malformed JSON 
 | `models` | Non-empty list of exact model IDs routed to this provider. IDs must be unique across all providers. |
 | `protocol` | Optional wire protocol: `openai-chat` (default, appends `/chat/completions`) or `anthropic-messages` (appends `/messages`). |
 | `headers` | Optional map of literal, non-secret headers added to upstream requests. Defaults to empty. |
+| `cacheTtl` | Optional cache-TTL override for `anthropic-messages` providers: `"5m"` (default behavior) or `"1h"`. Rewrites every ephemeral `cache_control` breakpoint forwarded upstream, letting you force Anthropic's 1-hour prompt cache instead of Claude Code's fixed 5-minute one. Rejected on `openai-chat` providers. |
 
 Configured API keys are resolved only when a request is routed to that provider. Authentication uses the standard `Authorization: Bearer` header. Custom headers are validated at startup and cannot override authentication, content negotiation, host/framing, user-agent, proxy-auth, or hop-by-hop headers. Native Anthropic entries preserve Messages request and response bodies and selectively forward incoming `anthropic-version` and `anthropic-beta`; OpenAI entries use request/response translation. Token counting remains local for both protocols.
 

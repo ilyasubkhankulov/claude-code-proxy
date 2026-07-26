@@ -74,6 +74,7 @@ async fn configured_provider_translates_non_stream_request_and_response() {
         models: vec!["moonshotai/kimi-k2.7-code".into()],
         protocol: Default::default(),
         headers: BTreeMap::new(),
+        cache_ttl: None,
         model_rewrites: BTreeMap::new(),
     }])
     .unwrap();
@@ -168,6 +169,7 @@ async fn cloudflare_gateway_routes_anthropic_and_openai_models() {
             models: vec!["anthropic/claude-sonnet-5".into(), "openai/gpt-5.5".into()],
             protocol: Default::default(),
             headers: BTreeMap::from([("cf-aig-gateway-id".into(), "test-gateway".into())]),
+            cache_ttl: None,
             model_rewrites: BTreeMap::new(),
         }])
         .unwrap(),
@@ -281,6 +283,7 @@ async fn cloudflare_anthropic_protocol_preserves_native_messages() {
         models: vec!["anthropic/claude-sonnet-5".into()],
         protocol: CompatibleProtocol::AnthropicMessages,
         headers: BTreeMap::from([("cf-aig-gateway-id".into(), "test-gateway".into())]),
+        cache_ttl: None,
         model_rewrites: BTreeMap::from([(
             "claude-opus-4-8".into(),
             "anthropic/claude-opus-4.8".into(),
@@ -418,6 +421,7 @@ async fn model_rewrite_sends_upstream_id_but_keeps_client_id_recognized() {
         models: vec!["anthropic/claude-sonnet-5".into()],
         protocol: CompatibleProtocol::AnthropicMessages,
         headers: BTreeMap::from([("cf-aig-gateway-id".into(), "test-gateway".into())]),
+        cache_ttl: None,
         model_rewrites: BTreeMap::from([(
             "claude-opus-4-8".into(),
             "anthropic/claude-opus-4.8".into(),
@@ -498,6 +502,7 @@ async fn configured_provider_reports_missing_api_key() {
         models: vec!["org/model".into()],
         protocol: Default::default(),
         headers: BTreeMap::new(),
+        cache_ttl: None,
         model_rewrites: BTreeMap::new(),
     }])
     .unwrap();
