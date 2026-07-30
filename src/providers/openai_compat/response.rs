@@ -3,6 +3,21 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+/// Deserialize a field that may be present-but-`null` into its `Default`.
+///
+/// `#[serde(default)]` only fills a field when it is *absent*; a field that is
+/// explicitly `null` still fails to deserialize into a non-`Option` type such as
+/// `Vec<T>`. Some OpenAI-compatible upstreams (e.g. Arcee) send
+/// `"tool_calls": null` rather than omitting it, so pair this with `default` to
+/// accept both the absent and the explicit-`null` forms.
+pub(crate) fn null_to_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Usage {
     #[serde(default)]
@@ -44,7 +59,7 @@ struct ResponseMessage {
     reasoning_content: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     tool_calls: Vec<ToolCall>,
 }
 
@@ -175,5 +190,22 @@ mod tests {
         assert_eq!(translated["usage"]["input_tokens"], 7);
         assert_eq!(translated["content"][0]["type"], "thinking");
         assert_eq!(translated["content"][2]["input"]["q"], "rust");
+    }
+
+    #[test]
+    fn tolerates_explicit_null_tool_calls() {
+        // Arcee and some other OpenAI-compatible upstreams send
+        // "tool_calls": null rather than omitting it. That must not fail
+        // deserialization (previously a 502 "invalid Chat Completions response").
+        let response = br#"{
+          "id":"chat_1",
+          "choices":[{"message":{"content":"OK","role":"assistant","tool_calls":null,"function_call":null,"reasoning_content":"brief"},"finish_reason":"stop"}],
+          "usage":{"prompt_tokens":19,"completion_tokens":62,"completion_tokens_details":{"reasoning_tokens":59},"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":null}}
+        }"#;
+        let translated = translate_response(response, "msg_1", "model", "custom").unwrap();
+        assert_eq!(translated["stop_reason"], "end_turn");
+        assert_eq!(translated["content"][0]["type"], "thinking");
+        assert_eq!(translated["content"][1]["type"], "text");
+        assert_eq!(translated["content"][1]["text"], "OK");
     }
 }

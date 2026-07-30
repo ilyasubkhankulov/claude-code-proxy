@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::anthropic::sse::encode_sse_event;
 
-use super::response::{Usage, anthropic_usage, thinking_signature};
+use super::response::{Usage, anthropic_usage, null_to_default, thinking_signature};
 
 const MAX_SSE_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -108,7 +108,7 @@ struct Delta {
     reasoning_content: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     tool_calls: Vec<ToolCallDelta>,
 }
 
@@ -508,6 +508,24 @@ mod tests {
         assert!(output.contains("thinking_delta"));
         assert!(output.contains("text_delta"));
         assert!(output.contains("input_json_delta"));
+        assert!(output.contains("message_stop"));
+    }
+
+    #[test]
+    fn tolerates_explicit_null_tool_calls_in_delta() {
+        // Some OpenAI-compatible upstreams (e.g. Arcee) put "tool_calls": null
+        // in the delta. That must parse rather than aborting the stream.
+        let upstream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":null}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"OK\",\"tool_calls\":null},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut translator = StreamTranslator::new("custom".into(), "msg_1".into(), "model".into());
+        let output = translator.push(upstream.as_bytes()).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("text_delta"));
+        assert!(output.contains("OK"));
         assert!(output.contains("message_stop"));
     }
 }
